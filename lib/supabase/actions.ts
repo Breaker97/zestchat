@@ -884,7 +884,7 @@ export async function getUserChats() {
 
     const { data: chats, error: cError } = await admin
       .from('chats')
-      .select('*, chat_members(user_id, profiles:user_id(id, full_name, username, avatar_url:profile_photo_url))')
+      .select('*, chat_members(user_id, profiles:user_id(id, full_name, username, bio, verification_status, avatar_url:profile_photo_url))')
       .in('id', chatIds)
 
     if (cError) throw cError
@@ -897,7 +897,10 @@ export async function getUserChats() {
           ...chat,
           title: partnerProfile?.full_name || 'ZestChat User',
           avatar_url: partnerProfile?.avatar_url || `https://api.dicebear.com/7.x/adventurer/svg?seed=${partnerProfile?.username || 'user'}`,
-          partner_id: partnerProfile?.id
+          partner_id: partnerProfile?.id,
+          username: partnerProfile?.username,
+          bio: partnerProfile?.bio,
+          verification_status: partnerProfile?.verification_status
         }
       }
       return {

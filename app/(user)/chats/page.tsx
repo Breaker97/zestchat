@@ -178,6 +178,10 @@ function ChatsContent() {
     title: "Select a Chat",
     avatar_url: "",
     description: "",
+    username: "",
+    bio: "",
+    verification_status: "",
+    type: "",
     sharedMedia: [],
     sharedDocs: []
   };
@@ -911,12 +915,29 @@ function ChatsContent() {
           </div>
 
           <div className="space-y-4 text-xs">
-            <div>
-              <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1.5">Description</h4>
-              <p className="text-on-surface-variant leading-relaxed">
-                {activePartner.description || "End-to-end encrypted messaging channel via Supabase RTC engine."}
-              </p>
-            </div>
+            {activePartner.type === 'direct' ? (
+              <>
+                {activePartner.username && (
+                  <div>
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Username</h4>
+                    <p className="text-on-surface-variant font-medium text-sm">@{activePartner.username}</p>
+                  </div>
+                )}
+                <div>
+                  <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1.5">Bio</h4>
+                  <p className="text-on-surface-variant leading-relaxed text-sm">
+                    {activePartner.bio || "No bio provided."}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div>
+                <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1.5">Description</h4>
+                <p className="text-on-surface-variant leading-relaxed">
+                  {activePartner.description || "Secure messaging channel."}
+                </p>
+              </div>
+            )}
           </div>
         </aside>
       )}
