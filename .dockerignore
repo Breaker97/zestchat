@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.github
+out
+build
+.env*
+.env.local
+Dockerfile
+.dockerignore
+README.md
+LICENSE
+CONTRIBUTING.md
+stitch_zestchat_premium_hub.zip
