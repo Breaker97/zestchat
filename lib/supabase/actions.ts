@@ -884,7 +884,7 @@ export async function getUserChats() {
 
     const { data: chats, error: cError } = await admin
       .from('chats')
-      .select('*, chat_members(user_id, profiles:user_id(id, full_name, username, bio, verification_status, avatar_url:profile_photo_url))')
+      .select('*, chat_members(user_id, profiles:user_id(id, full_name, username, email, mobile_number, country_code, bio, verification_status, created_at, avatar_url:profile_photo_url))')
       .in('id', chatIds)
 
     if (cError) throw cError
@@ -900,7 +900,11 @@ export async function getUserChats() {
           partner_id: partnerProfile?.id,
           username: partnerProfile?.username,
           bio: partnerProfile?.bio,
-          verification_status: partnerProfile?.verification_status
+          verification_status: partnerProfile?.verification_status,
+          email: partnerProfile?.email,
+          mobile_number: partnerProfile?.mobile_number,
+          country_code: partnerProfile?.country_code,
+          created_at_user: partnerProfile?.created_at
         }
       }
       return {
@@ -1454,3 +1458,278 @@ export async function uploadAvatarAction(base64Data: string) {
     return { error: err.message }
   }
 }
+
+// Upload message attachment action
+export async function uploadAttachmentAction(base64Data: string, originalName: string, mimeType: string) {
+  try {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) throw new Error("Unauthorized")
+
+    let realData = base64Data
+    if (base64Data.includes(';base64,')) {
+      realData = base64Data.split(';base64,')[1]
+    }
+    const buffer = Buffer.from(realData, 'base64')
+
+    const accessKeyId = process.env.R2_ACCESS_KEY_ID;
+    const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+    const bucketName = process.env.R2_BUCKET_NAME;
+    const endpoint = process.env.R2_ENDPOINT;
+
+    if (!accessKeyId || !secretAccessKey || !bucketName || !endpoint) {
+      throw new Error("Cloudflare R2 environment variables are not fully configured.");
+    }
+
+    const s3 = new S3Client({
+      region: "auto",
+      endpoint: endpoint,
+      credentials: {
+        accessKeyId,
+        secretAccessKey,
+      },
+    });
+
+    const fileExtension = originalName.split('.').pop() || 'bin'
+    const fileName = `attachments/${user.id}-${Date.now()}.${fileExtension}`
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: bucketName,
+        Key: fileName,
+        Body: buffer,
+        ContentType: mimeType,
+      })
+    );
+
+    let publicUrl = process.env.NEXT_PUBLIC_R2_PUBLIC_URL || process.env.R2_PUBLIC_URL;
+    if (!publicUrl) {
+      const match = endpoint.match(/https:\/\/([a-zA-Z0-9]+)\.r2\.cloudflarestorage\.com/);
+      if (match && match[1]) {
+        publicUrl = `https://pub-${match[1]}.r2.dev`;
+      } else {
+        publicUrl = endpoint;
+      }
+    }
+
+    const cleanBaseUrl = publicUrl.endsWith('/') ? publicUrl.slice(0, -1) : publicUrl;
+    const finalUrl = `${cleanBaseUrl}/${fileName}`;
+
+    return { success: true, url: finalUrl }
+  } catch (err: any) {
+    return { error: err.message }
+  }
+}
+
+// -------------------------------------------------------------
+// CALL RECORDING & LOGGING SYSTEM
+// -------------------------------------------------------------
+
+export async function logCallStartAction(chatId: string, type: string, channelName: string, partnerId: string) {
+  try {
+    const client = await createClient()
+    const { data: { user } } = await client.auth.getUser()
+    if (!user) throw new Error("Unauthorized")
+    
+    // Check if a call with this channel_name already exists to avoid unique constraint error
+    const { data: existingCall } = await client
+      .from('calls')
+      .select('id')
+      .eq('channel_name', channelName)
+      .maybeSingle()
+
+    if (existingCall) {
+      return { callId: existingCall.id }
+    }
+
+    // Insert into calls table
+    const { data: call, error: callError } = await client
+      .from('calls')
+      .insert({
+        channel_name: channelName,
+        type,
+        status: 'ringing',
+        host_id: user.id,
+        chat_id: chatId
+      })
+      .select('id')
+      .single()
+
+    if (callError) throw callError
+
+    // Insert host as participant
+    await client.from('call_participants').insert({
+      call_id: call.id,
+      user_id: user.id,
+      status: 'accepted',
+      joined_at: new Date().toISOString()
+    })
+
+    // Insert partner as participant
+    await client.from('call_participants').insert({
+      call_id: call.id,
+      user_id: partnerId,
+      status: 'ringing'
+    })
+
+    return { callId: call.id }
+  } catch (err: any) {
+    return { error: err.message }
+  }
+}
+
+export async function logCallAnswerAction(channelName: string) {
+  try {
+    const client = await createClient()
+    const { data: { user } } = await client.auth.getUser()
+    if (!user) throw new Error("Unauthorized")
+    
+    const { data: call } = await client
+      .from('calls')
+      .select('id')
+      .eq('channel_name', channelName)
+      .maybeSingle()
+
+    if (!call) return { error: "Call not found" }
+
+    // Update call status
+    await client
+      .from('calls')
+      .update({ status: 'connected' })
+      .eq('id', call.id)
+
+    // Update user's participant status
+    await client
+      .from('call_participants')
+      .update({ 
+        status: 'accepted',
+        joined_at: new Date().toISOString()
+      })
+      .eq('call_id', call.id)
+      .eq('user_id', user.id)
+
+    return { success: true }
+  } catch (err: any) {
+    return { error: err.message }
+  }
+}
+
+export async function logCallDeclineAction(channelName: string) {
+  try {
+    const client = await createClient()
+    const { data: { user } } = await client.auth.getUser()
+    if (!user) throw new Error("Unauthorized")
+    
+    const { data: call } = await client
+      .from('calls')
+      .select('id')
+      .eq('channel_name', channelName)
+      .maybeSingle()
+
+    if (!call) return { error: "Call not found" }
+
+    // Update call status
+    await client
+      .from('calls')
+      .update({ status: 'declined', ended_at: new Date().toISOString() })
+      .eq('id', call.id)
+
+    // Update user's participant status
+    await client
+      .from('call_participants')
+      .update({ 
+        status: 'declined',
+        left_at: new Date().toISOString()
+      })
+      .eq('call_id', call.id)
+      .eq('user_id', user.id)
+
+    return { success: true }
+  } catch (err: any) {
+    return { error: err.message }
+  }
+}
+
+export async function logCallEndAction(channelName: string, status?: string) {
+  try {
+    const client = await createClient()
+    const { data: { user } } = await client.auth.getUser()
+    if (!user) throw new Error("Unauthorized")
+    
+    const { data: call } = await client
+      .from('calls')
+      .select('id, status, created_at')
+      .eq('channel_name', channelName)
+      .maybeSingle()
+
+    if (!call) return { error: "Call not found" }
+
+    const endedAt = new Date().toISOString()
+    const callStatus = status || (call.status === 'ringing' ? 'missed' : 'completed')
+
+    // Update call status & end time
+    await client
+      .from('calls')
+      .update({ 
+        status: callStatus, 
+        ended_at: endedAt 
+      })
+      .eq('id', call.id)
+
+    // Update participants who haven't left yet
+    await client
+      .from('call_participants')
+      .update({ left_at: endedAt })
+      .eq('call_id', call.id)
+      .is('left_at', null)
+
+    return { success: true }
+  } catch (err: any) {
+    return { error: err.message }
+  }
+}
+
+export async function getUserCallHistoryAction() {
+  try {
+    const client = await createClient()
+    const { data: { user } } = await client.auth.getUser()
+    if (!user) throw new Error("Unauthorized")
+
+    // Fetch call records where user is either the host or participant
+    const { data: calls, error: callsError } = await client
+      .from('calls')
+      .select(`
+        id,
+        type,
+        status,
+        created_at,
+        ended_at,
+        host_id,
+        chat_id,
+        channel_name,
+        host:host_id(id, username, full_name, avatar_url),
+        participants:call_participants(
+          user_id,
+          status,
+          joined_at,
+          left_at,
+          profile:user_id(id, username, full_name, avatar_url)
+        )
+      `)
+      .order('created_at', { ascending: false })
+
+    if (callsError) throw callsError
+
+    // Filter calls in memory since Supabase JS client doesn't support complex joins + OR filtering cleanly on child relations
+    const userCalls = (calls || []).filter(call => {
+      const isHost = call.host_id === user.id;
+      const isParticipant = (call.participants || []).some((p: any) => p.user_id === user.id);
+      return isHost || isParticipant;
+    });
+
+    return { data: userCalls }
+  } catch (err: any) {
+    return { error: err.message }
+  }
+}
+

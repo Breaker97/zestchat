@@ -165,3 +165,11 @@ body {
   background: var(--primary-container);
   border-radius: 0 4px 4px 0;
 }
+
+/* Hide bottom navigation on mobile when a chat is open */
+body.mobile-chat-open nav.fixed.bottom-0 {
+  display: none !important;
+}
+body.mobile-chat-open main.flex-1 {
+  padding-bottom: 0 !important;
+}

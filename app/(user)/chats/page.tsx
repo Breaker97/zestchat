@@ -17,7 +17,10 @@ import {
   User, 
   BellOff, 
   X,
-  FileCheck,
+  Paperclip,
+  Image,
+  File,
+  Play,
   ArrowLeft,
   Mic,
   MicOff,
@@ -34,7 +37,12 @@ import {
   sendMessageAction, 
   createDirectChatAction,
   generateAgoraTokenAction,
-  getCurrentUserProfile
+  getCurrentUserProfile,
+  uploadAttachmentAction,
+  logCallStartAction,
+  logCallAnswerAction,
+  logCallDeclineAction,
+  logCallEndAction
 } from "@/lib/supabase/actions";
 import { createClient } from "@/lib/supabase/browser";
 
@@ -182,6 +190,11 @@ function ChatsContent() {
     bio: "",
     verification_status: "",
     type: "",
+    email: "",
+    mobile_number: "",
+    country_code: "",
+    created_at_user: "",
+    partner_id: "",
     sharedMedia: [],
     sharedDocs: []
   };
@@ -206,6 +219,11 @@ function ChatsContent() {
     partnerAvatar: string;
   } | null>(null);
   const [outgoingCall, setOutgoingCall] = useState(false);
+
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const ringtoneRef = useRef<RingtonePlayer | null>(null);
@@ -257,6 +275,17 @@ function ChatsContent() {
       if (result.data) setProfile(result.data);
     });
   }, []);
+
+  useEffect(() => {
+    if (activeChatId) {
+      document.body.classList.add("mobile-chat-open");
+    } else {
+      document.body.classList.remove("mobile-chat-open");
+    }
+    return () => {
+      document.body.classList.remove("mobile-chat-open");
+    };
+  }, [activeChatId]);
 
   // Handle partner ID from URL
   useEffect(() => {
@@ -385,7 +414,9 @@ function ChatsContent() {
     setIncomingCall(null);
     ringtoneRef.current?.stop();
     
+    const channelName = `ZestChat_${cid}`;
     await sendMessageAction(cid, 'CALL_ACCEPT', 'call_event');
+    await logCallAnswerAction(channelName);
     await startCall(type, true);
   };
 
@@ -394,7 +425,9 @@ function ChatsContent() {
     const cid = incomingCall.chatId;
     setIncomingCall(null);
     ringtoneRef.current?.stop();
+    const channelName = `ZestChat_${cid}`;
     await sendMessageAction(cid, 'CALL_DECLINE', 'call_event');
+    await logCallDeclineAction(channelName);
   };
 
   useEffect(() => {
@@ -421,6 +454,50 @@ function ChatsContent() {
     }
   };
 
+  const handleEmojiClick = (emoji: string) => {
+    setMessageText(prev => prev + emoji);
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeChatId) return;
+
+    setUploadingAttachment(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = reader.result as string;
+        
+        let messageType = 'document';
+        if (file.type.startsWith('image/')) {
+          messageType = 'image';
+        } else if (file.type.startsWith('video/')) {
+          messageType = 'video';
+        } else if (file.type.startsWith('audio/')) {
+          messageType = 'voice_note';
+        }
+
+        const res = await uploadAttachmentAction(base64, file.name, file.type);
+        if (res.error) {
+          alert("Failed to upload attachment: " + res.error);
+        } else if (res.url) {
+          const sendRes = await sendMessageAction(activeChatId, res.url, messageType);
+          if (sendRes.error) {
+            alert("Failed to send attachment: " + sendRes.error);
+          } else {
+            loadMessages();
+          }
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err: any) {
+      alert("Error handling file: " + err.message);
+    } finally {
+      setUploadingAttachment(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   // WebRTC Call Initiation
   const startCall = async (type: "audio" | "video", isJoin = false) => {
     if (!agoraClient || !activeChatId) return;
@@ -443,13 +520,16 @@ function ChatsContent() {
       if (type === "video" && !hasCamera) throw new Error("CAMERA_NOT_FOUND");
 
       // Play ringing sound and send start call event if we are starting the call
+      const channelName = `ZestChat_${activeChatId}`;
       if (!isJoin) {
         setOutgoingCall(true);
         ringtoneRef.current?.playOutgoing();
         await sendMessageAction(activeChatId, `CALL_START:${type}`, 'call_event');
+        if (activePartner && activePartner.partner_id) {
+          await logCallStartAction(activeChatId, type, channelName, activePartner.partner_id);
+        }
       }
 
-      const channelName = `ZestChat_${activeChatId}`;
       const res = await generateAgoraTokenAction(channelName);
       if (res.error || !res.token || !res.appId) {
         alert("Failed to generate Agora token: " + (res.error || "Missing configuration"));
@@ -546,7 +626,9 @@ function ChatsContent() {
     setOutgoingCall(false);
     ringtoneRef.current?.stop();
     if (activeChatId) {
+      const channelName = `ZestChat_${activeChatId}`;
       await sendMessageAction(activeChatId, 'CALL_END', 'call_event');
+      await logCallEndAction(channelName);
     }
     if (localAudioTrack) {
       localAudioTrack.close();
@@ -755,11 +837,11 @@ function ChatsContent() {
       </aside>
 
       {/* Main Messages Workspace */}
-      <section className={`${activeChatId ? "flex" : "hidden md:flex"} flex-1 min-w-0 w-full h-full flex-col bg-surface-container-lowest`}>
+      <section className={`${activeChatId ? "flex" : "hidden md:flex"} flex-1 min-w-0 w-full h-full max-h-full overflow-hidden flex-col bg-surface-container-lowest`}>
         {activeChatId ? (
           <>
             {/* Header */}
-            <header className="h-16 md:h-20 border-b border-outline-variant/30 px-2 sm:px-4 md:px-6 flex items-center justify-between bg-white dark:bg-surface-container-lowest shrink-0">
+            <header className="sticky top-0 z-10 h-16 md:h-20 border-b border-outline-variant/30 px-2 sm:px-4 md:px-6 flex items-center justify-between bg-white dark:bg-surface-container-lowest shrink-0">
               <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <button
                   type="button"
@@ -772,9 +854,13 @@ function ChatsContent() {
                 <img 
                   src={activePartner.avatar_url} 
                   alt={activePartner.title} 
-                  className="w-10 h-10 rounded-lg object-cover border border-outline-variant/10"
+                  onClick={() => setPreviewImageUrl(activePartner.avatar_url)}
+                  className="w-10 h-10 rounded-lg object-cover border border-outline-variant/10 cursor-pointer hover:opacity-80 transition-opacity shrink-0"
                 />
-                <div className="min-w-0">
+                <div 
+                  className="min-w-0 cursor-pointer hover:opacity-85 transition-opacity"
+                  onClick={() => setRightPanelOpen(true)}
+                >
                   <h3 className="font-plus-jakarta font-bold text-sm text-on-surface truncate">{activePartner.title}</h3>
                   <span className="text-[10px] text-primary font-bold">Secure connection</span>
                 </div>
@@ -808,13 +894,15 @@ function ChatsContent() {
             <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-5 scrollbar-hide bg-surface-container-lowest">
               {messages.map((msg) => {
                 const isMe = msg.sender_id === currentUserId;
+                const senderAvatar = msg.sender?.avatar_url || `https://api.dicebear.com/7.x/adventurer/svg?seed=${msg.sender?.username || 'user'}`;
                 return (
                   <div key={msg.id} className={`flex ${isMe ? "justify-end" : "justify-start"} items-end gap-3`}>
                     {!isMe && (
                       <img 
-                        src={msg.sender?.avatar_url || `https://api.dicebear.com/7.x/adventurer/svg?seed=${msg.sender?.username || 'user'}`} 
+                        src={senderAvatar} 
                         alt="sender"
-                        className="w-8 h-8 rounded-lg object-cover border border-outline-variant/10 shrink-0"
+                        onClick={() => setPreviewImageUrl(senderAvatar)}
+                        className="w-8 h-8 rounded-lg object-cover border border-outline-variant/10 shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
                       />
                     )}
                     <div className="max-w-[82%] sm:max-w-md">
@@ -846,6 +934,34 @@ function ChatsContent() {
                             </>
                           )}
                         </div>
+                      ) : msg.message_type === 'image' ? (
+                        <div className="relative group cursor-pointer overflow-hidden rounded-2xl" onClick={() => setPreviewImageUrl(msg.content)}>
+                          <img src={msg.content} alt="Attachment" className="max-w-xs max-h-64 object-cover rounded-2xl border border-outline-variant/10 shadow-md hover:scale-[1.02] transition-all" />
+                          <div className="absolute inset-0 bg-black/10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                            <span className="text-white text-xs font-bold bg-black/40 px-3 py-1 rounded-full backdrop-blur-md">Preview Image</span>
+                          </div>
+                        </div>
+                      ) : msg.message_type === 'video' ? (
+                        <div className="max-w-xs rounded-2xl overflow-hidden border border-outline-variant/10 shadow-md">
+                          <video src={msg.content} controls className="w-full h-auto rounded-2xl" />
+                        </div>
+                      ) : msg.message_type === 'voice_note' ? (
+                        <div className="flex items-center gap-3 p-3 bg-surface-container-high rounded-2xl border border-outline-variant/15 max-w-xs shadow-sm">
+                          <audio src={msg.content} controls className="w-full max-w-[240px] h-10 accent-primary" />
+                        </div>
+                      ) : msg.message_type === 'document' ? (
+                        <a 
+                          href={msg.content} 
+                          target="_blank" 
+                          rel="noopener noreferrer" 
+                          className="flex items-center gap-3 p-4 bg-surface-container/60 hover:bg-surface-container/90 rounded-2xl border border-outline-variant/20 max-w-xs transition-all shadow-sm group"
+                        >
+                          <FileText className="w-8 h-8 text-primary group-hover:scale-110 transition-transform shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold truncate text-on-surface">Attachment File</p>
+                            <span className="text-[10px] text-outline flex items-center gap-1"><Download className="w-3 h-3" /> Click to Download</span>
+                          </div>
+                        </a>
                       ) : (
                         <div className={`p-4 text-sm md:text-base leading-relaxed shadow-[0_4px_12px_rgba(0,0,0,0.03)] ${
                           isMe 
@@ -866,19 +982,78 @@ function ChatsContent() {
             </div>
 
             {/* Input Footer */}
-            <footer className="p-2 sm:p-3 md:p-6 bg-white dark:bg-surface-container-lowest border-t border-outline-variant/30 shrink-0">
+            <footer className="relative p-2 sm:p-3 md:p-6 bg-white dark:bg-surface-container-lowest border-t border-outline-variant/30 shrink-0">
+              {/* Emoji Picker Popup */}
+              {showEmojiPicker && (
+                <div className="absolute bottom-20 left-4 sm:left-10 z-50 bg-white dark:bg-zinc-950 border border-outline-variant/30 rounded-2xl p-4 w-72 sm:w-80 shadow-2xl animate-in slide-in-from-bottom-2 duration-150">
+                  <div className="flex justify-between items-center mb-2 pb-2 border-b border-outline-variant/10">
+                    <span className="text-xs font-bold text-outline">Select Emoji</span>
+                    <button type="button" onClick={() => setShowEmojiPicker(false)} className="p-1 hover:bg-surface-container-high rounded text-outline">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-8 gap-1.5 max-h-48 overflow-y-auto scrollbar-hide text-lg">
+                    {["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰", "😘", "😗", "😙", "😚", "😋", "😛", "😝", "😜", "🤪", "🤨", "🧐", "😎", "🤩", "🥳", "😏", "😒", "😞", "😔", "😟", "😕", "🙁", "☹️", "😣", "😖", "😫", "😩", "🥺", "😢", "😭", "😤", "😠", "😡", "🤬", "🤯", "😳", "🥵", "🥶", "😱", "😨", "😰", "😥", "😓", "🤗", "🤔", "🤭", "🤫", "🤥", "😐", "😑", "😬", "🙄", "😯", "😴", "🤤", "😪", "😵", "🤐", "🥴", "🤢", "🤮", "🤧", "😷", "🤒", "🤕", "💸", "👋", "👌", "✌️", "👍", "👎", "👏", "🙌", "🙏", "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "💔", "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "🎉", "🔥", "✨", "🚀"].map((emoji) => (
+                      <button 
+                        key={emoji} 
+                        type="button" 
+                        onClick={() => handleEmojiClick(emoji)} 
+                        className="p-1 hover:bg-surface-container-high rounded transition-all active:scale-90"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <form onSubmit={handleSendMessage} className="flex items-center gap-2 md:gap-3">
-                <button type="button" className="hidden sm:block p-2.5 text-on-surface-variant hover:text-primary rounded-xl transition-all">
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileChange} 
+                  className="hidden" 
+                />
+                
+                <button 
+                  type="button" 
+                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                  className={`p-2.5 rounded-xl transition-all ${showEmojiPicker ? "bg-primary-container/20 text-primary" : "text-on-surface-variant hover:text-primary"}`}
+                  title="Choose emoji"
+                >
                   <Smile className="w-5 h-5" />
                 </button>
-                <input 
-                  type="text" 
-                  value={messageText}
-                  onChange={(e) => setMessageText(e.target.value)}
-                  placeholder={`Write your secure message here...`}
-                  className="min-w-0 flex-1 bg-surface-container-low border border-outline-variant/20 rounded-full md:rounded-2xl px-4 md:px-5 py-3 text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all placeholder:text-outline-variant"
-                />
-                <button type="submit" className="p-3 bg-primary text-white hover:bg-primary/95 rounded-2xl shadow-md transition-all active:scale-95">
+
+                <button 
+                  type="button" 
+                  onClick={() => fileInputRef.current?.click()}
+                  className="p-2.5 text-on-surface-variant hover:text-primary rounded-xl transition-all shrink-0"
+                  title="Attach media/file"
+                  disabled={uploadingAttachment}
+                >
+                  <Paperclip className="w-5 h-5" />
+                </button>
+
+                {uploadingAttachment ? (
+                  <div className="flex-1 flex items-center gap-2 bg-surface-container-low border border-outline-variant/20 rounded-full md:rounded-2xl px-4 py-3">
+                    <span className="w-4.5 h-4.5 border-2 border-primary border-t-transparent rounded-full animate-spin shrink-0" />
+                    <span className="text-xs text-primary font-medium animate-pulse">Uploading secure media...</span>
+                  </div>
+                ) : (
+                  <input 
+                    type="text" 
+                    value={messageText}
+                    onChange={(e) => setMessageText(e.target.value)}
+                    placeholder={`Write your secure message here...`}
+                    className="min-w-0 flex-1 bg-surface-container-low border border-outline-variant/20 rounded-full md:rounded-2xl px-4 md:px-5 py-3 text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all placeholder:text-outline-variant"
+                  />
+                )}
+
+                <button 
+                  type="submit" 
+                  className="p-3 bg-primary text-white hover:bg-primary/95 rounded-2xl shadow-md transition-all active:scale-95 disabled:opacity-50 shrink-0"
+                  disabled={uploadingAttachment || (!messageText.trim())}
+                >
                   <Send className="w-4 h-4" />
                 </button>
               </form>
@@ -894,7 +1069,7 @@ function ChatsContent() {
 
       {/* Right Sidebar: Active Partner Info */}
       {rightPanelOpen && activeChatId && (
-        <aside className="hidden xl:flex w-80 h-full bg-white dark:bg-surface-container-lowest border-l border-outline-variant/30 p-6 flex-col gap-6 overflow-y-auto scrollbar-hide shrink-0">
+        <aside className="hidden xl:flex w-80 h-full bg-white dark:bg-surface-container-lowest border-l border-outline-variant/30 p-6 flex-col gap-6 overflow-y-auto scrollbar-hide shrink-0 animate-in slide-in-from-right duration-250">
           <div className="flex justify-between items-center">
             <h3 className="font-bold text-xs uppercase tracking-wider text-outline">Channel Profile</h3>
             <button onClick={() => setRightPanelOpen(false)} className="p-1 hover:bg-surface-container-high rounded-lg text-outline">
@@ -906,7 +1081,8 @@ function ChatsContent() {
             <img 
               src={activePartner.avatar_url} 
               alt={activePartner.title} 
-              className="w-24 h-24 rounded-3xl object-cover border border-outline-variant/10 shadow-sm"
+              onClick={() => setPreviewImageUrl(activePartner.avatar_url)}
+              className="w-24 h-24 rounded-3xl object-cover border border-outline-variant/10 shadow-sm cursor-pointer hover:opacity-80 transition-opacity"
             />
             <div>
               <h3 className="font-plus-jakarta font-bold text-base text-on-surface">{activePartner.title}</h3>
@@ -929,6 +1105,28 @@ function ChatsContent() {
                     {activePartner.bio || "No bio provided."}
                   </p>
                 </div>
+                {activePartner.email && (
+                  <div>
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Email Address</h4>
+                    <p className="text-on-surface-variant font-medium text-sm truncate">{activePartner.email}</p>
+                  </div>
+                )}
+                {activePartner.mobile_number && (
+                  <div>
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Mobile Number</h4>
+                    <p className="text-on-surface-variant font-medium text-sm">
+                      {activePartner.country_code ? `+${activePartner.country_code} ` : ""}{activePartner.mobile_number}
+                    </p>
+                  </div>
+                )}
+                {activePartner.created_at_user && (
+                  <div>
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Member Since</h4>
+                    <p className="text-on-surface-variant font-medium text-sm">
+                      {new Date(activePartner.created_at_user).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}
+                    </p>
+                  </div>
+                )}
               </>
             ) : (
               <div>
@@ -1101,6 +1299,39 @@ function ChatsContent() {
                   End Call
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lightbox / Big Image Preview Modal */}
+      {previewImageUrl && (
+        <div className="fixed inset-0 z-[200] bg-black/95 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <button 
+            type="button"
+            onClick={() => setPreviewImageUrl(null)} 
+            className="absolute top-6 right-6 w-12 h-12 bg-white/10 hover:bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center text-white transition-all hover:scale-105 active:scale-95 z-[210]"
+            aria-label="Close preview"
+          >
+            <X className="w-6 h-6" />
+          </button>
+          
+          <div className="relative max-w-4xl max-h-[85vh] flex items-center justify-center">
+            <img 
+              src={previewImageUrl} 
+              alt="Preview" 
+              className="max-w-full max-h-[80vh] object-contain rounded-xl shadow-2xl border border-white/10"
+            />
+            <div className="absolute -bottom-14 left-1/2 -translate-x-1/2 z-[210]">
+              <a 
+                href={previewImageUrl} 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                download
+                className="px-4 py-2 bg-white/10 hover:bg-white/20 backdrop-blur-md text-white text-xs font-semibold rounded-full flex items-center gap-1.5 transition-all"
+              >
+                <Download className="w-3.5 h-3.5" /> Download Image
+              </a>
             </div>
           </div>
         </div>
