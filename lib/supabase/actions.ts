@@ -4,6 +4,7 @@ import { createClient } from './server'
 import { createAdminClient } from './admin'
 import { redirect } from 'next/navigation'
 import { headers } from 'next/headers'
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
 
 async function getAdminRole(userId: string) {
   const admin = createAdminClient()
@@ -1342,7 +1343,7 @@ export async function getCurrentUserProfile() {
 }
 
 // Update current user's profile
-export async function updateUserProfile(name: string, username: string, bio: string) {
+export async function updateUserProfile(name: string, username: string, bio: string, avatarUrl?: string) {
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
@@ -1363,17 +1364,89 @@ export async function updateUserProfile(name: string, username: string, bio: str
       return { error: "Username is already taken" }
     }
 
+    const updateData: any = {
+      full_name: name.trim(),
+      username: normalizedUsername,
+      bio: bio.trim(),
+    }
+    if (avatarUrl) {
+      updateData.profile_photo_url = avatarUrl
+    }
+
     const { error } = await supabase
       .from('profiles')
-      .update({
-        full_name: name.trim(),
-        username: normalizedUsername,
-        bio: bio.trim(),
-      })
+      .update(updateData)
       .eq('id', user.id)
 
     if (error) throw error
     return { success: true }
+  } catch (err: any) {
+    return { error: err.message }
+  }
+}
+
+// Upload avatar action
+export async function uploadAvatarAction(base64Data: string) {
+  try {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) throw new Error("Unauthorized")
+
+    const matches = base64Data.match(/^data:(image\/[a-z0-9-+.]+);base64,(.+)$/)
+    let mimeType = 'image/png'
+    let realData = base64Data
+    if (matches && matches.length === 3) {
+      mimeType = matches[1]
+      realData = matches[2]
+    }
+    const buffer = Buffer.from(realData, 'base64')
+
+    const accessKeyId = process.env.R2_ACCESS_KEY_ID;
+    const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+    const bucketName = process.env.R2_BUCKET_NAME;
+    const endpoint = process.env.R2_ENDPOINT;
+
+    if (!accessKeyId || !secretAccessKey || !bucketName || !endpoint) {
+      throw new Error("Cloudflare R2 environment variables are not fully configured.");
+    }
+
+    const s3 = new S3Client({
+      region: "auto",
+      endpoint: endpoint,
+      credentials: {
+        accessKeyId,
+        secretAccessKey,
+      },
+    });
+
+    const fileExtension = mimeType.split('/')[1] || 'png'
+    const fileName = `avatars/${user.id}-${Date.now()}.${fileExtension}`
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: bucketName,
+        Key: fileName,
+        Body: buffer,
+        ContentType: mimeType,
+      })
+    );
+
+    // Get the public base URL or fallback to bucket subdomain
+    let publicUrl = process.env.NEXT_PUBLIC_R2_PUBLIC_URL || process.env.R2_PUBLIC_URL;
+    if (!publicUrl) {
+      const match = endpoint.match(/https:\/\/([a-zA-Z0-9]+)\.r2\.cloudflarestorage\.com/);
+      if (match && match[1]) {
+        // Construct standard r2.dev dev subdomain fallback
+        publicUrl = `https://pub-${match[1]}.r2.dev`;
+      } else {
+        publicUrl = endpoint;
+      }
+    }
+
+    const cleanBaseUrl = publicUrl.endsWith('/') ? publicUrl.slice(0, -1) : publicUrl;
+    const finalUrl = `${cleanBaseUrl}/${fileName}`;
+
+    return { success: true, url: finalUrl }
   } catch (err: any) {
     return { error: err.message }
   }

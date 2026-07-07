@@ -12,9 +12,10 @@ import {
   Sparkles,
   Loader2,
   XCircle,
-  CheckCircle2
+  CheckCircle2,
+  Camera
 } from "lucide-react";
-import { getCurrentUserProfile, updateUserProfile, checkUsernameAvailabilityAction } from "@/lib/supabase/actions";
+import { getCurrentUserProfile, updateUserProfile, checkUsernameAvailabilityAction, uploadAvatarAction } from "@/lib/supabase/actions";
 
 export default function SettingsPage() {
   const [activeSubTab, setActiveSubTab] = useState<"profile" | "privacy" | "notifications">("profile");
@@ -30,6 +31,8 @@ export default function SettingsPage() {
   const [isSaved, setIsSaved] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [loadingProfile, setLoadingProfile] = useState(true);
+  const [avatarUrl, setAvatarUrl] = useState("");
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
   // Username validation states
   const [usernameAvailable, setUsernameAvailable] = useState<boolean | null>(null);
@@ -61,6 +64,7 @@ export default function SettingsPage() {
           setBio(res.data.bio || "");
           setAge(res.data.age ? String(res.data.age) : "");
           setReferral(res.data.referral || "other");
+          setAvatarUrl(res.data.profile_photo_url || "");
           if (res.data.verification_status) {
             setVerificationStatus(res.data.verification_status);
           }
@@ -122,6 +126,36 @@ export default function SettingsPage() {
     return () => clearTimeout(delayDebounce);
   }, [username, originalUsername]);
 
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 3 * 1024 * 1024) {
+      alert("Image is too large. Please select an image smaller than 3MB.");
+      return;
+    }
+
+    setUploadingAvatar(true);
+    setErrorMessage("");
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const base64 = reader.result as string;
+      try {
+        const res = await uploadAvatarAction(base64);
+        if (res.success && res.url) {
+          setAvatarUrl(res.url);
+        } else {
+          setErrorMessage(res.error || "Failed to upload avatar.");
+        }
+      } catch (err: any) {
+        setErrorMessage(err.message || "Failed to upload avatar.");
+      } finally {
+        setUploadingAvatar(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleProfileSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage("");
@@ -135,7 +169,7 @@ export default function SettingsPage() {
       return;
     }
 
-    const res = await updateUserProfile(name, username, bio);
+    const res = await updateUserProfile(name, username, bio, avatarUrl);
     if (res.success) {
       setIsSaved(true);
       setOriginalUsername(username);
@@ -226,6 +260,48 @@ export default function SettingsPage() {
               <div>
                 <h3 className="font-plus-jakarta font-bold text-base">Public Profile</h3>
                 <p className="text-xs text-on-surface-variant mt-0.5">Customize how other users find and view your profile information.</p>
+              </div>
+
+              {/* Profile Photo Upload */}
+              <div className="flex items-center gap-6 p-4 bg-surface-container-low rounded-2xl border border-outline-variant/10">
+                <div className="relative group shrink-0">
+                  <img 
+                    src={avatarUrl || `https://api.dicebear.com/7.x/adventurer/svg?seed=${username || 'user'}`} 
+                    alt="Profile Avatar" 
+                    className="w-20 h-20 rounded-full object-cover border-2 border-primary/20 shadow-sm"
+                  />
+                  {uploadingAvatar && (
+                    <div className="absolute inset-0 bg-black/40 rounded-full flex items-center justify-center text-white">
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    </div>
+                  )}
+                </div>
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-bold text-on-surface">Profile Picture</label>
+                  <div className="flex items-center gap-2">
+                    <label className="px-4 py-2 bg-primary/10 hover:bg-primary/15 text-primary text-xs font-bold rounded-xl cursor-pointer transition-all flex items-center gap-1.5 active:scale-95">
+                      <Camera className="w-3.5 h-3.5" />
+                      <span>{uploadingAvatar ? "Uploading..." : "Upload New Photo"}</span>
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        onChange={handleAvatarChange} 
+                        className="hidden" 
+                        disabled={uploadingAvatar}
+                      />
+                    </label>
+                    {avatarUrl && (
+                      <button 
+                        type="button" 
+                        onClick={() => setAvatarUrl("")}
+                        className="px-3 py-2 hover:bg-rose-50 text-rose-600 dark:hover:bg-rose-950/20 text-xs font-bold rounded-xl transition-all active:scale-95"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-on-surface-variant">JPG, PNG or WEBP. Max size 3MB.</span>
+                </div>
               </div>
 
               <div className="flex flex-col gap-1.5">

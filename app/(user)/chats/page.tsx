@@ -38,6 +38,128 @@ import {
 } from "@/lib/supabase/actions";
 import { createClient } from "@/lib/supabase/browser";
 
+// browser audio synthesis player for calling/ringing sounds
+class RingtonePlayer {
+  private audioCtx: AudioContext | null = null;
+  private intervalId: any = null;
+
+  constructor() {}
+
+  private init() {
+    if (typeof window === 'undefined') return;
+    if (!this.audioCtx) {
+      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtxClass) {
+        this.audioCtx = new AudioCtxClass();
+      }
+    }
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume();
+    }
+  }
+
+  playIncoming() {
+    if (typeof window === 'undefined') return;
+    this.stop();
+    this.init();
+    if (!this.audioCtx) return;
+
+    const playRing = () => {
+      if (!this.audioCtx || this.audioCtx.state === 'suspended') return;
+      
+      try {
+        const osc1 = this.audioCtx.createOscillator();
+        const osc2 = this.audioCtx.createOscillator();
+        const gainNode = this.audioCtx.createGain();
+
+        osc1.frequency.setValueAtTime(440, this.audioCtx.currentTime);
+        osc2.frequency.setValueAtTime(480, this.audioCtx.currentTime);
+
+        const tremolo = this.audioCtx.createOscillator();
+        const tremoloGain = this.audioCtx.createGain();
+        tremolo.frequency.setValueAtTime(20, this.audioCtx.currentTime); 
+        tremoloGain.gain.setValueAtTime(10, this.audioCtx.currentTime);
+
+        tremolo.connect(tremoloGain);
+        tremoloGain.connect(osc1.frequency);
+        tremoloGain.connect(osc2.frequency);
+
+        gainNode.gain.setValueAtTime(0, this.audioCtx.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.2, this.audioCtx.currentTime + 0.1);
+        gainNode.gain.setValueAtTime(0.2, this.audioCtx.currentTime + 1.2);
+        gainNode.gain.linearRampToValueAtTime(0, this.audioCtx.currentTime + 1.3);
+
+        osc1.connect(gainNode);
+        osc2.connect(gainNode);
+        gainNode.connect(this.audioCtx.destination);
+
+        osc1.start();
+        osc2.start();
+        tremolo.start();
+
+        setTimeout(() => {
+          try {
+            osc1.stop();
+            osc2.stop();
+            tremolo.stop();
+          } catch (e) {}
+        }, 1500);
+      } catch (e) {
+        console.error("Audio error", e);
+      }
+    };
+
+    playRing();
+    this.intervalId = setInterval(playRing, 3000);
+  }
+
+  playOutgoing() {
+    if (typeof window === 'undefined') return;
+    this.stop();
+    this.init();
+    if (!this.audioCtx) return;
+
+    const playBeep = () => {
+      if (!this.audioCtx || this.audioCtx.state === 'suspended') return;
+
+      try {
+        const osc = this.audioCtx.createOscillator();
+        const gainNode = this.audioCtx.createGain();
+
+        osc.frequency.setValueAtTime(425, this.audioCtx.currentTime); 
+
+        gainNode.gain.setValueAtTime(0, this.audioCtx.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.1, this.audioCtx.currentTime + 0.05);
+        gainNode.gain.setValueAtTime(0.1, this.audioCtx.currentTime + 1.0);
+        gainNode.gain.linearRampToValueAtTime(0, this.audioCtx.currentTime + 1.1);
+
+        osc.connect(gainNode);
+        gainNode.connect(this.audioCtx.destination);
+
+        osc.start();
+
+        setTimeout(() => {
+          try {
+            osc.stop();
+          } catch (e) {}
+        }, 1200);
+      } catch (e) {
+        console.error("Audio error", e);
+      }
+    };
+
+    playBeep();
+    this.intervalId = setInterval(playBeep, 4000);
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+}
+
 function ChatsContent() {
   const searchParams = useSearchParams();
   const partnerIdParam = searchParams.get("chatId");
@@ -52,6 +174,14 @@ function ChatsContent() {
   const [profile, setProfile] = useState<any>(null);
   const [chatSearch, setChatSearch] = useState("");
 
+  const activePartner = chats.find(c => c.id === activeChatId) || {
+    title: "Select a Chat",
+    avatar_url: "",
+    description: "",
+    sharedMedia: [],
+    sharedDocs: []
+  };
+
   // Agora RTC State
   const [callActive, setCallActive] = useState(false);
   const [callType, setCallType] = useState<"audio" | "video">("audio");
@@ -64,7 +194,24 @@ function ChatsContent() {
   const [speakerOn, setSpeakerOn] = useState(true);
   const [cameraOff, setCameraOff] = useState(false);
 
+  // Call Signaling State
+  const [incomingCall, setIncomingCall] = useState<{
+    type: "audio" | "video";
+    chatId: string;
+    partnerTitle: string;
+    partnerAvatar: string;
+  } | null>(null);
+  const [outgoingCall, setOutgoingCall] = useState(false);
+
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const ringtoneRef = useRef<RingtonePlayer | null>(null);
+
+  useEffect(() => {
+    ringtoneRef.current = new RingtonePlayer();
+    return () => {
+      ringtoneRef.current?.stop();
+    };
+  }, []);
 
   // Initialize Agora client
   useEffect(() => {
@@ -149,6 +296,103 @@ function ChatsContent() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Call Signaling Listener
+  useEffect(() => {
+    if (messages.length === 0 || !currentUserId) return;
+    
+    const lastMsg = messages[messages.length - 1];
+    const timeDiff = Date.now() - new Date(lastMsg.created_at).getTime();
+    
+    // Handle signaling events that are very recent (within 20 seconds)
+    if (lastMsg.message_type === 'call_event' && timeDiff < 20000) {
+      if (lastMsg.sender_id !== currentUserId) {
+        if (lastMsg.content.startsWith('CALL_START:')) {
+          const type = lastMsg.content.split(':')[1] as 'audio' | 'video';
+          if (!callActive && !incomingCall && !outgoingCall) {
+            setIncomingCall({
+              type,
+              chatId: activeChatId!,
+              partnerTitle: activePartner.title,
+              partnerAvatar: activePartner.avatar_url
+            });
+            ringtoneRef.current?.playIncoming();
+          }
+        } else if (lastMsg.content === 'CALL_DECLINE' || lastMsg.content === 'CALL_END') {
+          if (incomingCall) {
+            setIncomingCall(null);
+            ringtoneRef.current?.stop();
+          }
+          if (callActive) {
+            // Stop local stream
+            setCallActive(false);
+            if (localAudioTrack) {
+              localAudioTrack.close();
+              setLocalAudioTrack(null);
+            }
+            if (localVideoTrack) {
+              localVideoTrack.close();
+              setLocalVideoTrack(null);
+            }
+            if (agoraClient) {
+              agoraClient.leave().catch(console.error);
+            }
+            setRemoteUsers([]);
+            setIsMuted(false);
+            setCameraOff(false);
+          }
+        } else if (lastMsg.content === 'CALL_ACCEPT') {
+          // Partner accepted the call
+          if (outgoingCall) {
+            setOutgoingCall(false);
+            ringtoneRef.current?.stop();
+          }
+        }
+      }
+    }
+  }, [messages, currentUserId, activeChatId, activePartner.title, activePartner.avatar_url, callActive, incomingCall, outgoingCall, localAudioTrack, localVideoTrack, agoraClient]);
+
+  // Call timeouts
+  useEffect(() => {
+    let timeout: any = null;
+    if (outgoingCall) {
+      timeout = setTimeout(() => {
+        alert("No answer.");
+        endCall();
+      }, 30000);
+    }
+    return () => clearTimeout(timeout);
+  }, [outgoingCall]);
+
+  useEffect(() => {
+    let timeout: any = null;
+    if (incomingCall) {
+      timeout = setTimeout(() => {
+        setIncomingCall(null);
+        ringtoneRef.current?.stop();
+      }, 30000);
+    }
+    return () => clearTimeout(timeout);
+  }, [incomingCall]);
+
+  const acceptIncomingCall = async () => {
+    if (!incomingCall) return;
+    const type = incomingCall.type;
+    const cid = incomingCall.chatId;
+    setIncomingCall(null);
+    ringtoneRef.current?.stop();
+    
+    await sendMessageAction(cid, 'CALL_ACCEPT', 'call_event');
+    await startCall(type, true);
+  };
+
+  const declineIncomingCall = async () => {
+    if (!incomingCall) return;
+    const cid = incomingCall.chatId;
+    setIncomingCall(null);
+    ringtoneRef.current?.stop();
+    await sendMessageAction(cid, 'CALL_DECLINE', 'call_event');
+  };
+
   useEffect(() => {
     if (!callActive) {
       setCallSeconds(0);
@@ -174,7 +418,7 @@ function ChatsContent() {
   };
 
   // WebRTC Call Initiation
-  const startCall = async (type: "audio" | "video") => {
+  const startCall = async (type: "audio" | "video", isJoin = false) => {
     if (!agoraClient || !activeChatId) return;
     setCallType(type);
 
@@ -194,11 +438,20 @@ function ChatsContent() {
       if (!hasMicrophone) throw new Error("MICROPHONE_NOT_FOUND");
       if (type === "video" && !hasCamera) throw new Error("CAMERA_NOT_FOUND");
 
+      // Play ringing sound and send start call event if we are starting the call
+      if (!isJoin) {
+        setOutgoingCall(true);
+        ringtoneRef.current?.playOutgoing();
+        await sendMessageAction(activeChatId, `CALL_START:${type}`, 'call_event');
+      }
+
       const channelName = `ZestChat_${activeChatId}`;
       const res = await generateAgoraTokenAction(channelName);
       if (res.error || !res.token || !res.appId) {
         alert("Failed to generate Agora token: " + (res.error || "Missing configuration"));
         setCallActive(false);
+        setOutgoingCall(false);
+        ringtoneRef.current?.stop();
         return;
       }
 
@@ -227,6 +480,10 @@ function ChatsContent() {
 
       agoraClient.on("user-published", async (user: any, mediaType: string) => {
         await agoraClient.subscribe(user, mediaType);
+        // Stop outgoing ringtone when user publishes media
+        setOutgoingCall(false);
+        ringtoneRef.current?.stop();
+
         if (mediaType === "video") {
           setRemoteUsers((prev) => {
             if (prev.find(u => u.uid === user.uid)) return prev;
@@ -262,6 +519,8 @@ function ChatsContent() {
       setLocalVideoTrack(null);
       setLocalAudioTrack(null);
       setCallActive(false);
+      setOutgoingCall(false);
+      ringtoneRef.current?.stop();
 
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("MICROPHONE_NOT_FOUND") || message.includes("DEVICE_NOT_FOUND")) {
@@ -280,6 +539,11 @@ function ChatsContent() {
 
   const endCall = async () => {
     setCallActive(false);
+    setOutgoingCall(false);
+    ringtoneRef.current?.stop();
+    if (activeChatId) {
+      await sendMessageAction(activeChatId, 'CALL_END', 'call_event');
+    }
     if (localAudioTrack) {
       localAudioTrack.close();
       setLocalAudioTrack(null);
@@ -335,21 +599,52 @@ function ChatsContent() {
       await agoraClient.publish(track);
       setLocalVideoTrack(track);
       setCallType('video');
-      setTimeout(() => track.play('local-video-container'), 200);
+      setTimeout(() => {
+        const localContainer = document.getElementById("local-video-container");
+        if (localContainer) {
+          track.play(localContainer);
+        }
+      }, 200);
     } catch {
       alert('No camera is available. Connect or enable a camera to switch to video.');
     }
   };
 
-  const formattedCallTime = `${String(Math.floor(callSeconds / 60)).padStart(2, '0')}:${String(callSeconds % 60).padStart(2, '0')}`;
-
-  const activePartner = chats.find(c => c.id === activeChatId) || {
-    title: "Select a Chat",
-    avatar_url: "",
-    description: "",
-    sharedMedia: [],
-    sharedDocs: []
+  const handleSwitchCamera = async () => {
+    if (!localVideoTrack) return;
+    try {
+      const AgoraRTC = (await import("agora-rtc-sdk-ng")).default;
+      const devices = await AgoraRTC.getCameras(true);
+      if (devices.length <= 1) {
+        alert("Only one camera device detected.");
+        return;
+      }
+      
+      const currentTrackInfo = localVideoTrack.getTrackLabel();
+      const currentDevice = devices.find(d => d.label === currentTrackInfo);
+      const currentId = currentDevice?.deviceId || localVideoTrack.getMediaStreamTrack().getSettings().deviceId;
+      
+      let nextIndex = 0;
+      if (currentId) {
+        const currentIndex = devices.findIndex(d => d.deviceId === currentId);
+        if (currentIndex !== -1) {
+          nextIndex = (currentIndex + 1) % devices.length;
+        }
+      }
+      
+      const nextDevice = devices[nextIndex];
+      await localVideoTrack.setDevice(nextDevice.deviceId);
+      console.log("Switched camera to:", nextDevice.label);
+    } catch (err) {
+      console.error("Failed to switch camera:", err);
+      alert("Failed to switch camera device.");
+    }
   };
+
+  const formattedCallTime = outgoingCall 
+    ? "Ringing..." 
+    : `${String(Math.floor(callSeconds / 60)).padStart(2, '0')}:${String(callSeconds % 60).padStart(2, '0')}`;
+
   const filteredChats = chats.filter(chat =>
     (chat.title || "").toLowerCase().includes(chatSearch.trim().toLowerCase())
   );
@@ -519,13 +814,43 @@ function ChatsContent() {
                       />
                     )}
                     <div className="max-w-[82%] sm:max-w-md">
-                      <div className={`p-4 text-sm md:text-base leading-relaxed shadow-[0_4px_12px_rgba(0,0,0,0.03)] ${
-                        isMe 
-                          ? "bg-primary-container text-on-primary-container rounded-2xl rounded-br-sm" 
-                          : "bg-surface-container-high text-on-surface rounded-2xl rounded-bl-sm"
-                      }`}>
-                        <p>{msg.content}</p>
-                      </div>
+                      {msg.message_type === 'call_event' ? (
+                        <div className={`p-3 text-xs leading-relaxed rounded-2xl flex items-center gap-2 border ${
+                          isMe 
+                            ? "bg-primary-container/10 text-primary border-primary/20" 
+                            : "bg-surface-container/40 text-on-surface-variant border-outline-variant/20"
+                        }`}>
+                          {msg.content.startsWith('CALL_START:') ? (
+                            <>
+                              <Phone className="w-3.5 h-3.5 animate-pulse text-primary shrink-0" />
+                              <span>Call started ({msg.content.split(':')[1]})</span>
+                            </>
+                          ) : msg.content === 'CALL_ACCEPT' ? (
+                            <>
+                              <Phone className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                              <span>Call accepted</span>
+                            </>
+                          ) : msg.content === 'CALL_DECLINE' ? (
+                            <>
+                              <PhoneOff className="w-3.5 h-3.5 text-error shrink-0" />
+                              <span>Call declined</span>
+                            </>
+                          ) : (
+                            <>
+                              <PhoneOff className="w-3.5 h-3.5 text-outline shrink-0" />
+                              <span>Call ended</span>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <div className={`p-4 text-sm md:text-base leading-relaxed shadow-[0_4px_12px_rgba(0,0,0,0.03)] ${
+                          isMe 
+                            ? "bg-primary-container text-on-primary-container rounded-2xl rounded-br-sm" 
+                            : "bg-surface-container-high text-on-surface rounded-2xl rounded-bl-sm"
+                        }`}>
+                          <p>{msg.content}</p>
+                        </div>
+                      )}
                       <span className="text-[9px] text-outline mt-1.5 block text-right font-medium">
                         {new Date(msg.created_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>
@@ -607,7 +932,7 @@ function ChatsContent() {
               </div>
               <div className="absolute top-0 inset-x-0 p-6 md:p-8 flex justify-between z-20">
                 <div><h2 className="font-plus-jakarta text-2xl font-bold">{activePartner.title}</h2><p className="text-white/75 text-sm flex items-center gap-2"><span className="w-2 h-2 bg-primary-container rounded-full animate-pulse" />{formattedCallTime}</p></div>
-                <button className="w-11 h-11 rounded-full bg-white/15 backdrop-blur-xl flex items-center justify-center"><Camera className="w-5 h-5" /></button>
+                <button onClick={handleSwitchCamera} className="w-11 h-11 rounded-full bg-white/15 backdrop-blur-xl flex items-center justify-center hover:bg-white/25 active:scale-95 transition-all"><Camera className="w-5 h-5" /></button>
               </div>
               <div id="local-video-container" className={`absolute top-24 right-5 md:right-8 w-28 h-40 md:w-40 md:h-56 rounded-2xl border-2 border-white/25 shadow-2xl overflow-hidden z-20 scale-x-[-1] ${cameraOff ? 'invisible' : ''}`} />
               <div className="absolute bottom-8 inset-x-0 px-4 z-20">
@@ -615,18 +940,83 @@ function ChatsContent() {
                   <button onClick={toggleCamera} className={`w-12 h-12 rounded-full flex items-center justify-center ${cameraOff ? 'bg-white text-zinc-900' : 'bg-white/10'}`}>{cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}</button>
                   <button onClick={toggleMute} className={`w-12 h-12 rounded-full flex items-center justify-center ${isMuted ? 'bg-white text-zinc-900' : 'bg-white/10'}`}>{isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
                   <button onClick={switchCallMode} className="w-12 h-12 rounded-full bg-white/10 flex items-center justify-center"><Phone className="w-5 h-5" /></button>
-                  <button onClick={endCall} className="w-16 h-16 rounded-full bg-error text-white flex items-center justify-center shadow-xl"><PhoneOff className="w-7 h-7" /></button>
+                  <button onClick={endCall} className="w-16 h-16 rounded-full bg-error text-white flex items-center justify-center shadow-xl active:scale-95 transition-all"><PhoneOff className="w-7 h-7" /></button>
                 </div>
-                <p className="mt-3 text-center text-xs text-white/75">Excellent Quality · Secure connection</p>
+                <p className="mt-3 text-center text-xs text-white/75 font-medium">Excellent Quality · Secure connection</p>
               </div>
             </>
           ) : (
-            <div className="h-full max-w-md mx-auto px-6 py-16 md:py-20 flex flex-col items-center justify-between text-center">
-              <div><p className="uppercase tracking-[0.2em] text-xs font-bold text-on-surface-variant flex items-center justify-center gap-2"><ShieldCheck className="w-4 h-4 text-primary" />Secure Connection</p><h2 className="font-plus-jakarta text-3xl font-bold mt-8">{activePartner.title}</h2><p className="text-primary font-bold mt-2">{formattedCallTime}</p></div>
-              <div className="relative flex items-center justify-center"><span className="absolute w-72 h-72 rounded-full bg-primary/10 animate-ping" /><span className="absolute w-60 h-60 rounded-full bg-primary/15" /><img src={activePartner.avatar_url} alt={activePartner.title} className="relative w-52 h-52 md:w-60 md:h-60 rounded-full object-cover border-4 border-primary-container p-1 shadow-xl" /></div>
-              <div className="w-full"><div className="flex items-center justify-center gap-8"><button onClick={toggleMute} className={`w-14 h-14 rounded-full flex items-center justify-center shadow-sm ${isMuted ? 'bg-primary-container' : 'bg-surface-container-high'}`}>{isMuted ? <MicOff /> : <Mic />}</button><button onClick={endCall} className="w-20 h-20 rounded-full bg-error text-white flex items-center justify-center shadow-xl"><PhoneOff className="w-8 h-8" /></button><button onClick={() => setSpeakerOn(value => !value)} className={`w-14 h-14 rounded-full flex items-center justify-center shadow-sm ${speakerOn ? 'bg-surface-container-high' : 'bg-primary-container'}`}>{speakerOn ? <Volume2 /> : <VolumeX />}</button></div><button onClick={switchCallMode} className="mt-10 px-6 py-3 rounded-full bg-white/45 border border-white/50 font-semibold inline-flex items-center gap-2"><Video className="w-5 h-5" />Switch to Video</button></div>
+            <div className="h-full max-w-md mx-auto px-6 py-6 md:py-16 flex flex-col items-center justify-between text-center overflow-hidden">
+              <div className="mt-2 md:mt-6">
+                <p className="uppercase tracking-[0.2em] text-[10px] sm:text-xs font-bold text-on-surface-variant flex items-center justify-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-primary" />Secure Connection
+                </p>
+                <h2 className="font-plus-jakarta text-2xl sm:text-3xl font-bold mt-4 md:mt-8 truncate max-w-xs">{activePartner.title}</h2>
+                <p className="text-primary font-bold mt-1 sm:mt-2 text-sm sm:text-base">{formattedCallTime}</p>
+              </div>
+              
+              <div className="relative flex items-center justify-center my-4 shrink">
+                <span className="absolute w-48 h-48 sm:w-60 sm:h-60 md:w-72 md:h-72 rounded-full bg-primary/10 animate-ping" />
+                <span className="absolute w-40 h-40 sm:w-48 sm:h-48 md:w-60 md:h-60 rounded-full bg-primary/15" />
+                <img 
+                  src={activePartner.avatar_url} 
+                  alt={activePartner.title} 
+                  className="relative w-32 h-32 sm:w-40 sm:h-40 md:w-52 md:h-52 rounded-full object-cover border-4 border-primary-container p-1 shadow-xl shrink-0" 
+                />
+              </div>
+              
+              <div className="w-full mt-4 md:mt-8 shrink-0">
+                <div className="flex items-center justify-center gap-6 sm:gap-8">
+                  <button onClick={toggleMute} className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center shadow-sm transition-all ${isMuted ? 'bg-primary-container text-primary' : 'bg-surface-container-high text-on-surface'}`}>{isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</button>
+                  <button onClick={endCall} className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-error text-white flex items-center justify-center shadow-xl active:scale-95 transition-all"><PhoneOff className="w-6 h-6 sm:w-8 sm:h-8" /></button>
+                  <button onClick={() => setSpeakerOn(value => !value)} className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center shadow-sm transition-all ${speakerOn ? 'bg-surface-container-high text-on-surface' : 'bg-primary-container text-primary'}`}>{speakerOn ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}</button>
+                </div>
+                <button onClick={switchCallMode} className="mt-6 sm:mt-10 px-5 py-2.5 sm:px-6 sm:py-3 rounded-full bg-white/45 dark:bg-white/10 border border-white/50 dark:border-white/20 font-semibold inline-flex items-center gap-2 text-xs sm:text-sm active:scale-95 transition-all"><Video className="w-4 h-4 sm:w-5 sm:h-5" />Switch to Video</button>
+              </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Incoming Call Ringing Overlay */}
+      {incomingCall && (
+        <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-white dark:bg-zinc-900 rounded-[2.5rem] border border-outline-variant/20 p-8 shadow-2xl flex flex-col items-center text-center gap-6 animate-in fade-in zoom-in-95 duration-200">
+            <div>
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary/10 text-primary text-[10px] font-bold uppercase tracking-wider animate-pulse">
+                <Phone className="w-3 h-3" /> Incoming {incomingCall.type} Call
+              </span>
+            </div>
+            
+            <div className="relative">
+              <span className="absolute inset-0 rounded-full bg-primary/15 animate-ping scale-110" />
+              <img 
+                src={incomingCall.partnerAvatar} 
+                alt={incomingCall.partnerTitle} 
+                className="relative w-24 h-24 rounded-full object-cover border-4 border-white dark:border-zinc-800 shadow-xl"
+              />
+            </div>
+
+            <div>
+              <h3 className="font-plus-jakarta font-extrabold text-xl text-on-surface">{incomingCall.partnerTitle}</h3>
+              <p className="text-sm text-on-surface-variant mt-1">is calling you on ZestChat...</p>
+            </div>
+
+            <div className="flex items-center gap-4 w-full mt-2">
+              <button 
+                onClick={declineIncomingCall}
+                className="flex-1 py-3.5 bg-red-50 hover:bg-red-100 dark:bg-red-950/20 dark:hover:bg-red-950/40 text-red-600 hover:text-red-700 font-bold rounded-2xl border border-red-200/30 transition-all flex items-center justify-center gap-2 active:scale-95"
+              >
+                <PhoneOff className="w-4 h-4" /> Decline
+              </button>
+              <button 
+                onClick={acceptIncomingCall}
+                className="flex-1 py-3.5 bg-primary hover:bg-primary/95 text-white font-bold rounded-2xl shadow-lg shadow-primary/25 transition-all flex items-center justify-center gap-2 active:scale-95"
+              >
+                <Phone className="w-4 h-4 animate-bounce" /> Accept
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
