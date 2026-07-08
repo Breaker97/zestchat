@@ -46,6 +46,9 @@ export default function SettingsPage() {
   const [findByName, setFindByName] = useState("everyone");
   const [seePhoto, setSeePhoto] = useState("friends");
   const [readReceipts, setReadReceipts] = useState(true);
+  const [dob, setDob] = useState("");
+  const [hideMobile, setHideMobile] = useState(false);
+  const [hideDob, setHideDob] = useState(false);
 
   // Notifications settings state
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -65,6 +68,9 @@ export default function SettingsPage() {
           setAge(res.data.age ? String(res.data.age) : "");
           setReferral(res.data.referral || "other");
           setAvatarUrl(res.data.profile_photo_url || "");
+          setDob(res.data.dob || "");
+          setHideMobile(res.data.hide_mobile || false);
+          setHideDob(res.data.hide_dob || false);
           if (res.data.verification_status) {
             setVerificationStatus(res.data.verification_status);
           }
@@ -169,13 +175,26 @@ export default function SettingsPage() {
       return;
     }
 
-    const res = await updateUserProfile(name, username, bio, avatarUrl);
+    const res = await updateUserProfile(name, username, bio, avatarUrl || undefined, dob || null, hideMobile, hideDob);
     if (res.success) {
       setIsSaved(true);
       setOriginalUsername(username);
       setTimeout(() => setIsSaved(false), 3000);
     } else {
       setErrorMessage(res.error || "Failed to update profile.");
+    }
+  };
+
+  const handlePrivacySave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage("");
+
+    const res = await updateUserProfile(name, username, bio, avatarUrl || undefined, dob || null, hideMobile, hideDob);
+    if (res.success) {
+      setIsSaved(true);
+      setTimeout(() => setIsSaved(false), 3000);
+    } else {
+      setErrorMessage(res.error || "Failed to update privacy settings.");
     }
   };
 
@@ -353,15 +372,15 @@ export default function SettingsPage() {
                 />
               </div>
 
-              {/* Age and Referral (Read Only / Profile Info display) */}
+              {/* Date of Birth and Referral */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Age</label>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">Date of Birth</label>
                   <input 
-                    type="number" 
-                    value={age}
-                    onChange={(e) => setAge(e.target.value)}
-                    className="w-full bg-surface border border-outline-variant/20 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
+                    type="date" 
+                    value={dob}
+                    onChange={(e) => setDob(e.target.value)}
+                    className="w-full bg-surface border border-outline-variant/20 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-on-surface font-semibold"
                   />
                 </div>
 
@@ -392,13 +411,41 @@ export default function SettingsPage() {
 
           {/* Tab: Privacy & RLS */}
           {activeSubTab === "privacy" && (
-            <div className="space-y-6">
+            <form onSubmit={handlePrivacySave} className="space-y-6">
               <div>
                 <h3 className="font-plus-jakarta font-bold text-base">Privacy Settings</h3>
                 <p className="text-xs text-on-surface-variant mt-0.5">Control access rules and database RLS filtering constraints.</p>
               </div>
 
               <div className="space-y-4">
+                <div className="flex items-center justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/10">
+                  <div>
+                    <h4 className="font-semibold text-sm">Hide Mobile Number</h4>
+                    <p className="text-[11px] text-on-surface-variant mt-0.5">Hide your phone number from other users on your profile page</p>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setHideMobile(!hideMobile)}
+                    className={`w-11 h-6 rounded-full transition-all relative ${hideMobile ? "bg-primary" : "bg-outline-variant"}`}
+                  >
+                    <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${hideMobile ? "left-6" : "left-1"}`}></span>
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/10">
+                  <div>
+                    <h4 className="font-semibold text-sm">Hide Date of Birth</h4>
+                    <p className="text-[11px] text-on-surface-variant mt-0.5">Hide your date of birth from other users on your profile page</p>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setHideDob(!hideDob)}
+                    className={`w-11 h-6 rounded-full transition-all relative ${hideDob ? "bg-primary" : "bg-outline-variant"}`}
+                  >
+                    <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${hideDob ? "left-6" : "left-1"}`}></span>
+                  </button>
+                </div>
+
                 <div className="flex items-center justify-between p-4 bg-surface-container-low rounded-2xl border border-outline-variant/10">
                   <div>
                     <h4 className="font-semibold text-sm">Who can find me by name</h4>
@@ -437,6 +484,7 @@ export default function SettingsPage() {
                     <p className="text-[11px] text-on-surface-variant mt-0.5">Send message seen hooks to chat partners</p>
                   </div>
                   <button 
+                    type="button"
                     onClick={() => setReadReceipts(!readReceipts)}
                     className={`w-11 h-6 rounded-full transition-all relative ${readReceipts ? "bg-primary" : "bg-outline-variant"}`}
                   >
@@ -446,12 +494,12 @@ export default function SettingsPage() {
               </div>
 
               <button 
-                onClick={() => setIsSaved(true)}
+                type="submit"
                 className="px-6 py-3 bg-primary text-white font-semibold text-xs rounded-xl shadow-md hover:bg-primary/95 transition-all"
               >
                 Save Settings
               </button>
-            </div>
+            </form>
           )}
 
           {/* Tab: Notifications */}

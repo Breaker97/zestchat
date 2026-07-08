@@ -884,12 +884,46 @@ export async function getUserChats() {
 
     const { data: chats, error: cError } = await admin
       .from('chats')
-      .select('*, chat_members(user_id, profiles:user_id(id, full_name, username, email, mobile_number, country_code, bio, verification_status, created_at, avatar_url:profile_photo_url))')
+      .select('*, chat_members(user_id, profiles:user_id(id, full_name, username, email, mobile_number, country_code, bio, verification_status, created_at, avatar_url:profile_photo_url, dob, hide_mobile, hide_dob))')
       .in('id', chatIds)
 
     if (cError) throw cError
 
+    // Fetch last message for each chat to show like WhatsApp
+    const { data: messages, error: messagesError } = await admin
+      .from('messages')
+      .select('id, chat_id, content, message_type, created_at, sender_id')
+      .in('chat_id', chatIds)
+      .order('created_at', { ascending: false })
+
+    const latestMessagesMap: Record<string, any> = {}
+    if (messages) {
+      for (const msg of messages) {
+        if (!latestMessagesMap[msg.chat_id]) {
+          latestMessagesMap[msg.chat_id] = msg
+        }
+      }
+    }
+
     const mappedChats = chats.map(chat => {
+      const latestMsg = latestMessagesMap[chat.id]
+      let lastMsgText = chat.description || "Active messaging channel"
+      if (latestMsg) {
+        if (latestMsg.message_type === 'image') {
+          lastMsgText = "📷 Photo"
+        } else if (latestMsg.message_type === 'video') {
+          lastMsgText = "🎥 Video"
+        } else if (latestMsg.message_type === 'voice_note') {
+          lastMsgText = "🎵 Voice note"
+        } else if (latestMsg.message_type === 'document') {
+          lastMsgText = "📄 Document"
+        } else if (latestMsg.message_type === 'call_event') {
+          lastMsgText = `📞 ${latestMsg.content}`
+        } else {
+          lastMsgText = latestMsg.content
+        }
+      }
+
       if (chat.type === 'direct') {
         const partnerMember = chat.chat_members.find((m: any) => m.user_id !== user.id)
         const partnerProfile = partnerMember?.profiles
@@ -904,13 +938,27 @@ export async function getUserChats() {
           email: partnerProfile?.email,
           mobile_number: partnerProfile?.mobile_number,
           country_code: partnerProfile?.country_code,
-          created_at_user: partnerProfile?.created_at
+          created_at_user: partnerProfile?.created_at,
+          dob: partnerProfile?.dob,
+          hide_mobile: partnerProfile?.hide_mobile,
+          hide_dob: partnerProfile?.hide_dob,
+          last_message: latestMsg || null,
+          last_message_text: lastMsgText
         }
       }
       return {
         ...chat,
-        avatar_url: chat.cover_photo_url || 'https://api.dicebear.com/7.x/identicon/svg?seed=group'
+        avatar_url: chat.cover_photo_url || 'https://api.dicebear.com/7.x/identicon/svg?seed=group',
+        last_message: latestMsg || null,
+        last_message_text: lastMsgText
       }
+    })
+
+    // Sort chats so that the ones with the most recent messages are first
+    mappedChats.sort((a, b) => {
+      const timeA = a.last_message ? new Date(a.last_message.created_at).getTime() : new Date(a.updated_at).getTime()
+      const timeB = b.last_message ? new Date(b.last_message.created_at).getTime() : new Date(b.updated_at).getTime()
+      return timeB - timeA
     })
 
     return { data: mappedChats }
@@ -1350,7 +1398,7 @@ export async function getCurrentUserProfile() {
 }
 
 // Update current user's profile
-export async function updateUserProfile(name: string, username: string, bio: string, avatarUrl?: string) {
+export async function updateUserProfile(name: string, username: string, bio: string, avatarUrl?: string, dob?: string | null, hideMobile?: boolean, hideDob?: boolean) {
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
@@ -1378,6 +1426,15 @@ export async function updateUserProfile(name: string, username: string, bio: str
     }
     if (avatarUrl) {
       updateData.profile_photo_url = avatarUrl
+    }
+    if (dob !== undefined) {
+      updateData.dob = dob ? dob : null
+    }
+    if (hideMobile !== undefined) {
+      updateData.hide_mobile = hideMobile
+    }
+    if (hideDob !== undefined) {
+      updateData.hide_dob = hideDob
     }
 
     const { error } = await supabase
@@ -1707,13 +1764,13 @@ export async function getUserCallHistoryAction() {
         host_id,
         chat_id,
         channel_name,
-        host:host_id(id, username, full_name, avatar_url),
+        host:host_id(id, username, full_name, avatar_url:profile_photo_url),
         participants:call_participants(
           user_id,
           status,
           joined_at,
           left_at,
-          profile:user_id(id, username, full_name, avatar_url)
+          profile:user_id(id, username, full_name, avatar_url:profile_photo_url)
         )
       `)
       .order('created_at', { ascending: false })

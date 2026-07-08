@@ -46,6 +46,13 @@ import {
 } from "@/lib/supabase/actions";
 import { createClient } from "@/lib/supabase/browser";
 
+interface RealtimeMessage {
+  chat_id: string;
+  sender_id: string;
+  message_type: string;
+  content: string;
+}
+
 // browser audio synthesis player for calling/ringing sounds
 class RingtonePlayer {
   private audioCtx: AudioContext | null = null;
@@ -63,6 +70,37 @@ class RingtonePlayer {
     }
     if (this.audioCtx && this.audioCtx.state === 'suspended') {
       this.audioCtx.resume();
+    }
+  }
+
+  playMessageNotification() {
+    if (typeof window === 'undefined') return;
+    this.init();
+    if (!this.audioCtx) return;
+    if (this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume();
+    }
+
+    try {
+      const osc = this.audioCtx.createOscillator();
+      const gainNode = this.audioCtx.createGain();
+
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(587.33, this.audioCtx.currentTime); // D5
+      osc.frequency.setValueAtTime(880.00, this.audioCtx.currentTime + 0.1); // A5
+
+      gainNode.gain.setValueAtTime(0, this.audioCtx.currentTime);
+      gainNode.gain.linearRampToValueAtTime(0.15, this.audioCtx.currentTime + 0.05);
+      gainNode.gain.linearRampToValueAtTime(0.1, this.audioCtx.currentTime + 0.12);
+      gainNode.gain.linearRampToValueAtTime(0, this.audioCtx.currentTime + 0.22);
+
+      osc.connect(gainNode);
+      gainNode.connect(this.audioCtx.destination);
+
+      osc.start();
+      osc.stop(this.audioCtx.currentTime + 0.25);
+    } catch (e) {
+      console.error("Failed to play message sound:", e);
     }
   }
 
@@ -168,6 +206,52 @@ class RingtonePlayer {
   }
 }
 
+const renderAvatar = (name: string, avatarUrl: string | null, sizeClass = "w-10 h-10", textClass = "text-sm", onClick?: () => void) => {
+  const isDefault = !avatarUrl || avatarUrl.includes("api.dicebear.com") || avatarUrl.includes("images.unsplash.com");
+  const initial = (name || "U").trim().charAt(0).toUpperCase();
+
+  if (isDefault) {
+    const colors = [
+      "bg-gradient-to-tr from-primary to-indigo-600 text-white",
+      "bg-gradient-to-tr from-rose-500 to-orange-500 text-white",
+      "bg-gradient-to-tr from-emerald-500 to-teal-600 text-white",
+      "bg-gradient-to-tr from-amber-500 to-yellow-600 text-white",
+      "bg-gradient-to-tr from-violet-600 to-fuchsia-600 text-white",
+    ];
+    const index = (name || "").length % colors.length;
+    const bgClass = colors[index];
+
+    return (
+      <div 
+        onClick={onClick}
+        className={`${sizeClass} ${bgClass} rounded-2xl flex items-center justify-center font-bold tracking-wider shadow-sm select-none shrink-0 ${onClick ? 'cursor-pointer hover:opacity-90' : ''}`}
+      >
+        <span className={textClass}>{initial}</span>
+      </div>
+    );
+  }
+
+  return (
+    <img 
+      src={avatarUrl} 
+      alt={name} 
+      onClick={onClick}
+      onContextMenu={(e) => e.preventDefault()}
+      onDragStart={(e) => e.preventDefault()}
+      className={`${sizeClass} rounded-2xl object-cover border border-outline-variant/10 shrink-0 ${onClick ? 'cursor-pointer hover:opacity-85 transition-opacity' : ''}`}
+    />
+  );
+};
+
+const formatDuration = (totalSeconds: number) => {
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  if (mins > 0) {
+    return `${mins}m ${secs}s`;
+  }
+  return `${secs}s`;
+};
+
 function ChatsContent() {
   const searchParams = useSearchParams();
   const partnerIdParam = searchParams.get("chatId");
@@ -227,6 +311,15 @@ function ChatsContent() {
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const ringtoneRef = useRef<RingtonePlayer | null>(null);
+  const chatsRef = useRef<typeof chats>([]);
+  const activeChatIdRef = useRef<string | null>(null);
+  const callBusyRef = useRef(false);
+
+  useEffect(() => {
+    chatsRef.current = chats;
+    activeChatIdRef.current = activeChatId;
+    callBusyRef.current = callActive || Boolean(incomingCall) || outgoingCall;
+  }, [chats, activeChatId, callActive, incomingCall, outgoingCall]);
 
   useEffect(() => {
     ringtoneRef.current = new RingtonePlayer();
@@ -276,6 +369,61 @@ function ChatsContent() {
     });
   }, []);
 
+  // Poll chats list and play message notification sound
+  useEffect(() => {
+    if (!currentUserId) return;
+    const interval = window.setInterval(async () => {
+      const res = await getUserChats();
+      if (res.data) {
+        setChats(prevChats => {
+          let hasNewMessage = false;
+          for (const newChat of res.data) {
+            const prevChat = prevChats.find(c => c.id === newChat.id);
+            const prevMsgId = prevChat?.last_message?.id;
+            const newMsgId = newChat.last_message?.id;
+
+            // Check for call signaling
+            const latestMsg = newChat.last_message;
+            if (latestMsg && latestMsg.message_type === 'call_event') {
+              const msgTime = new Date(latestMsg.created_at).getTime();
+              const diff = Date.now() - msgTime;
+              // If it's a call start signal, is recent (last 20s), and not from us
+              if (latestMsg.content.startsWith('CALL_START:') && diff < 20000 && latestMsg.sender_id !== currentUserId) {
+                const typeOfCall = latestMsg.content.split(':')[1] as 'audio' | 'video';
+                if (!callActive && !incomingCall && !outgoingCall) {
+                  setIncomingCall({
+                    type: typeOfCall,
+                    chatId: newChat.id,
+                    partnerTitle: newChat.title || 'ZestChat User',
+                    partnerAvatar: newChat.avatar_url
+                  });
+                  ringtoneRef.current?.playIncoming();
+                }
+              } else if ((latestMsg.content === 'CALL_DECLINE' || latestMsg.content === 'CALL_END') && diff < 20000 && latestMsg.sender_id !== currentUserId) {
+                // If it's a call cancel/decline signal, close incoming call view
+                if (incomingCall && incomingCall.chatId === newChat.id) {
+                  setIncomingCall(null);
+                  ringtoneRef.current?.stop();
+                }
+              }
+            }
+
+            if (newMsgId && newMsgId !== prevMsgId) {
+              if (newChat.last_message?.sender_id !== currentUserId) {
+                hasNewMessage = true;
+              }
+            }
+          }
+          if (hasNewMessage && ringtoneRef.current) {
+            ringtoneRef.current.playMessageNotification();
+          }
+          return res.data;
+        });
+      }
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [currentUserId, callActive, incomingCall, outgoingCall]);
+
   useEffect(() => {
     if (activeChatId) {
       document.body.classList.add("mobile-chat-open");
@@ -316,14 +464,66 @@ function ChatsContent() {
     loadMessages();
   }, [activeChatId]);
 
-  // Refresh through the authenticated server action. The current database
-  // chat_members RLS policy is recursive, so direct browser Realtime reads
-  // cannot safely authorize message payloads.
+  // Keep the active conversation fresh as a fallback if Realtime reconnects.
   useEffect(() => {
     if (!activeChatId) return;
     const interval = window.setInterval(loadMessages, 2000);
     return () => window.clearInterval(interval);
   }, [activeChatId]);
+
+  // Receive call signals immediately. RLS limits message payloads to chats the
+  // signed-in user belongs to; the polling effects above remain as a fallback.
+  useEffect(() => {
+    if (!currentUserId) return;
+
+    const supabase = createClient();
+    const channel = supabase
+      .channel(`message-signals:${currentUserId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        (payload) => {
+          const message = payload.new as RealtimeMessage;
+
+          if (message.chat_id === activeChatIdRef.current) {
+            void getChatMessages(message.chat_id).then((result) => {
+              if (result.data) setMessages(result.data);
+            });
+          }
+          void getUserChats().then((result) => {
+            if (result.data) setChats(result.data);
+          });
+
+          if (
+            message.message_type !== "call_event" ||
+            message.sender_id === currentUserId ||
+            !message.content?.startsWith("CALL_START:") ||
+            callBusyRef.current
+          ) return;
+
+          const chat = chatsRef.current.find((item) => item.id === message.chat_id);
+          if (!chat) return;
+
+          callBusyRef.current = true;
+          setIncomingCall({
+            type: message.content.split(":")[1] === "video" ? "video" : "audio",
+            chatId: message.chat_id,
+            partnerTitle: chat.title || "ZestChat User",
+            partnerAvatar: chat.avatar_url || ""
+          });
+          ringtoneRef.current?.playIncoming();
+        }
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error(`Call notification Realtime subscription: ${status}`);
+        }
+      });
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [currentUserId]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -350,7 +550,7 @@ function ChatsContent() {
             });
             ringtoneRef.current?.playIncoming();
           }
-        } else if (lastMsg.content === 'CALL_DECLINE' || lastMsg.content === 'CALL_END') {
+        } else if (lastMsg.content === 'CALL_DECLINE' || lastMsg.content === 'CALL_END' || lastMsg.content.startsWith('Call ended')) {
           if (incomingCall) {
             setIncomingCall(null);
             ringtoneRef.current?.stop();
@@ -414,10 +614,12 @@ function ChatsContent() {
     setIncomingCall(null);
     ringtoneRef.current?.stop();
     
+    setActiveChatId(cid);
+    
     const channelName = `ZestChat_${cid}`;
     await sendMessageAction(cid, 'CALL_ACCEPT', 'call_event');
     await logCallAnswerAction(channelName);
-    await startCall(type, true);
+    await startCall(type, true, cid);
   };
 
   const declineIncomingCall = async () => {
@@ -499,8 +701,9 @@ function ChatsContent() {
   };
 
   // WebRTC Call Initiation
-  const startCall = async (type: "audio" | "video", isJoin = false) => {
-    if (!agoraClient || !activeChatId) return;
+  const startCall = async (type: "audio" | "video", isJoin = false, overrideChatId?: string) => {
+    const targetChatId = overrideChatId || activeChatId;
+    if (!agoraClient || !targetChatId) return;
     setCallType(type);
 
     let createdAudioTrack: any = null;
@@ -520,13 +723,14 @@ function ChatsContent() {
       if (type === "video" && !hasCamera) throw new Error("CAMERA_NOT_FOUND");
 
       // Play ringing sound and send start call event if we are starting the call
-      const channelName = `ZestChat_${activeChatId}`;
+      const channelName = `ZestChat_${targetChatId}`;
       if (!isJoin) {
         setOutgoingCall(true);
         ringtoneRef.current?.playOutgoing();
-        await sendMessageAction(activeChatId, `CALL_START:${type}`, 'call_event');
-        if (activePartner && activePartner.partner_id) {
-          await logCallStartAction(activeChatId, type, channelName, activePartner.partner_id);
+        await sendMessageAction(targetChatId, `CALL_START:${type}`, 'call_event');
+        const targetChat = chats.find(c => c.id === targetChatId) || activePartner;
+        if (targetChat && targetChat.partner_id) {
+          await logCallStartAction(targetChatId, type, channelName, targetChat.partner_id);
         }
       }
 
@@ -627,7 +831,8 @@ function ChatsContent() {
     ringtoneRef.current?.stop();
     if (activeChatId) {
       const channelName = `ZestChat_${activeChatId}`;
-      await sendMessageAction(activeChatId, 'CALL_END', 'call_event');
+      const durationText = callSeconds > 0 ? ` • ${formatDuration(callSeconds)}` : "";
+      await sendMessageAction(activeChatId, `Call ended${durationText}`, 'call_event');
       await logCallEndAction(channelName);
     }
     if (localAudioTrack) {
@@ -768,7 +973,7 @@ function ChatsContent() {
               <button type="button" className="text-on-surface-variant" aria-label="Search chats" onClick={() => document.getElementById('mobile-chat-search')?.focus()}>
                 <Search className="w-7 h-7" />
               </button>
-              <img src={profile?.profile_photo_url || `https://api.dicebear.com/7.x/adventurer/svg?seed=${profile?.username || 'user'}`} alt="Your profile" className="w-11 h-11 rounded-full object-cover border-2 border-primary" />
+              {renderAvatar(profile?.full_name || "You", profile?.profile_photo_url || null, "w-11 h-11 border-2 border-primary", "text-base")}
             </div>
           </div>
           <input
@@ -788,7 +993,7 @@ function ChatsContent() {
             {chats.slice(0, 4).map(chat => (
               <button key={chat.id} type="button" onClick={() => setActiveChatId(chat.id)} className="w-16 shrink-0 flex flex-col items-center gap-2">
                 <div className="relative rounded-full p-0.5 border-2 border-primary-container">
-                  <img src={chat.avatar_url} alt={chat.title} className="w-12 h-12 rounded-full object-cover" />
+                  {renderAvatar(chat.title, chat.avatar_url, "w-12 h-12", "text-sm")}
                   <span className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full bg-primary-container border-2 border-surface" />
                 </div>
                 <span className="w-full truncate text-[10px] font-semibold">{chat.title}</span>
@@ -817,17 +1022,13 @@ function ChatsContent() {
                     : "border-transparent bg-surface-container-lowest md:bg-transparent hover:bg-surface-container-low"
                 }`}
               >
-                <img 
-                  src={chat.avatar_url} 
-                  alt={chat.title} 
-                  className="w-14 h-14 md:w-12 md:h-12 rounded-2xl md:rounded-full object-cover border border-outline-variant/10 shrink-0"
-                />
+                {renderAvatar(chat.title, chat.avatar_url, "w-14 h-14 md:w-12 md:h-12", "text-base md:text-sm")}
                 <div className="flex-1 min-w-0">
                   <div className="flex justify-between items-baseline mb-1">
                     <h3 className="font-plus-jakarta font-semibold text-base md:text-sm truncate text-on-surface">{chat.title}</h3>
                   </div>
                   <p className="text-sm md:text-xs text-on-surface-variant truncate">
-                    {chat.description || "Active messaging channel"}
+                    {chat.last_message_text || chat.description || "Active messaging channel"}
                   </p>
                 </div>
               </div>
@@ -851,12 +1052,11 @@ function ChatsContent() {
                 >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
-                <img 
-                  src={activePartner.avatar_url} 
-                  alt={activePartner.title} 
-                  onClick={() => setPreviewImageUrl(activePartner.avatar_url)}
-                  className="w-10 h-10 rounded-lg object-cover border border-outline-variant/10 cursor-pointer hover:opacity-80 transition-opacity shrink-0"
-                />
+                {renderAvatar(activePartner.title, activePartner.avatar_url, "w-10 h-10", "text-sm", () => {
+                  if (activePartner.avatar_url && !activePartner.avatar_url.includes("api.dicebear.com") && !activePartner.avatar_url.includes("images.unsplash.com")) {
+                    setPreviewImageUrl(activePartner.avatar_url);
+                  }
+                })}
                 <div 
                   className="min-w-0 cursor-pointer hover:opacity-85 transition-opacity"
                   onClick={() => setRightPanelOpen(true)}
@@ -897,14 +1097,17 @@ function ChatsContent() {
                 const senderAvatar = msg.sender?.avatar_url || `https://api.dicebear.com/7.x/adventurer/svg?seed=${msg.sender?.username || 'user'}`;
                 return (
                   <div key={msg.id} className={`flex ${isMe ? "justify-end" : "justify-start"} items-end gap-3`}>
-                    {!isMe && (
-                      <img 
-                        src={senderAvatar} 
-                        alt="sender"
-                        onClick={() => setPreviewImageUrl(senderAvatar)}
-                        className="w-8 h-8 rounded-lg object-cover border border-outline-variant/10 shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
-                      />
-                    )}
+                    {!isMe && 
+                      renderAvatar(
+                        msg.sender?.full_name || msg.sender?.username || "User", 
+                        msg.sender?.avatar_url || null, 
+                        "w-8 h-8", 
+                        "text-[10px]", 
+                        msg.sender?.avatar_url && !msg.sender?.avatar_url.includes("api.dicebear.com") && !msg.sender?.avatar_url.includes("images.unsplash.com")
+                          ? () => setPreviewImageUrl(msg.sender.avatar_url)
+                          : undefined
+                      )
+                    }
                     <div className="max-w-[82%] sm:max-w-md">
                       {msg.message_type === 'call_event' ? (
                         <div className={`p-3 text-xs leading-relaxed rounded-2xl flex items-center gap-2 border ${
@@ -930,7 +1133,7 @@ function ChatsContent() {
                           ) : (
                             <>
                               <PhoneOff className="w-3.5 h-3.5 text-outline shrink-0" />
-                              <span>Call ended</span>
+                              <span>{msg.content.startsWith('Call ended') ? msg.content : 'Call ended'}</span>
                             </>
                           )}
                         </div>
@@ -1078,12 +1281,15 @@ function ChatsContent() {
           </div>
 
           <div className="flex flex-col items-center text-center gap-3 pb-6 border-b border-outline-variant/10">
-            <img 
-              src={activePartner.avatar_url} 
-              alt={activePartner.title} 
-              onClick={() => setPreviewImageUrl(activePartner.avatar_url)}
-              className="w-24 h-24 rounded-3xl object-cover border border-outline-variant/10 shadow-sm cursor-pointer hover:opacity-80 transition-opacity"
-            />
+            {renderAvatar(
+              activePartner.title, 
+              activePartner.avatar_url, 
+              "w-24 h-24 rounded-3xl", 
+              "text-3xl",
+              activePartner.avatar_url && !activePartner.avatar_url.includes("api.dicebear.com") && !activePartner.avatar_url.includes("images.unsplash.com")
+                ? () => setPreviewImageUrl(activePartner.avatar_url)
+                : undefined
+            )}
             <div>
               <h3 className="font-plus-jakarta font-bold text-base text-on-surface">{activePartner.title}</h3>
               <p className="text-xs text-on-surface-variant">Secure Communication Hub</p>
@@ -1105,18 +1311,26 @@ function ChatsContent() {
                     {activePartner.bio || "No bio provided."}
                   </p>
                 </div>
-                {activePartner.email && (
-                  <div>
-                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Email Address</h4>
-                    <p className="text-on-surface-variant font-medium text-sm truncate">{activePartner.email}</p>
-                  </div>
-                )}
-                {activePartner.mobile_number && (
+                {activePartner.mobile_number && !activePartner.hide_mobile && (
                   <div>
                     <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Mobile Number</h4>
                     <p className="text-on-surface-variant font-medium text-sm">
                       {activePartner.country_code ? `+${activePartner.country_code} ` : ""}{activePartner.mobile_number}
                     </p>
+                  </div>
+                )}
+                {activePartner.dob && !activePartner.hide_dob && (
+                  <div>
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Date of Birth</h4>
+                    <p className="text-on-surface-variant font-medium text-sm">
+                      {new Date(activePartner.dob).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}
+                    </p>
+                  </div>
+                )}
+                {activePartner.email && (
+                  <div>
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-outline mb-1">Email Address</h4>
+                    <p className="text-on-surface-variant font-medium text-sm truncate">{activePartner.email}</p>
                   </div>
                 )}
                 {activePartner.created_at_user && (
